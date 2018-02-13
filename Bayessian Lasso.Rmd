@@ -1,0 +1,581 @@
+---
+title: "stat545project"
+author: "Xiangyu Xu"
+date: "December 2, 2017"
+output: word_document
+---
+
+```{r}
+install.packages('readr')
+library('readr')
+
+
+install.packages("lars")
+library("lars")
+
+```
+```{r}
+
+install.packages("mnormt")
+library("mnormt")
+```
+```{r}
+install.packages("miscTools")
+library("miscTools")
+```
+```{r}
+install.packages("ggplot2")
+library("ggplot2")
+```
+```{r}
+install.packages("sm")
+library("sm")
+```
+```{r}
+install.packages("statmod") 
+library("statmod")
+```
+
+```{r}
+install.packages("grid")
+library("grid")
+install.packages("gridExtra")
+library("gridExtra")
+```
+
+
+
+```{r}
+#where alpha >= 1#
+sample_gamma1 <- function(n,alpha,beta){
+  d <- alpha-1/3  
+  c <- 1/sqrt(9*d)
+  i <- 0
+  sample<-c()
+  while(i < n){
+    Z <- rnorm(1,0,1)
+    U <- runif(1,0,1)
+    V <- (1+c*Z)^3
+    if(Z > -1/c & log(U) < 0.5*(Z^2)+d-d*V+d*log(V)){
+      X <- d*V/beta
+      i <- i+1
+      sample <- append(sample,X)
+    }
+  }
+  return(sample)
+}
+```
+
+
+```{r}
+
+m<-matrix(data=cbind(sample_gamma1(10000,2,2),rgamma(10000,2,2)),nrow=10000,ncol=2)
+colnames(m)<-c("self-coded gamma","r package gamma")
+df<-as.data.frame(m)
+dfs<-stack(df)
+ggplot(dfs, aes(x=values))+geom_density(aes(group=ind,color=ind))+ggtitle("Density plot of gamma(alpha>1)")+theme(plot.title = element_text(hjust=0.5, face="bold"))
+
+m<-matrix(data=cbind(sample_gamma1(10000,0.5,2),rgamma(10000,0.5,2)),nrow=10000,ncol=2)
+colnames(m)<-c("self-coded gamma","r package gamma")
+df<-as.data.frame(m)
+dfs<-stack(df)
+ggplot(dfs, aes(x=values))+geom_density(aes(group=ind,color=ind))+ggtitle("Density plot of gamma(alpha<1)")+theme(plot.title = element_text(hjust=0.5, face="bold"))
+
+
+
+
+```
+
+```{r}
+m<-matrix(data=cbind(sample_invgaussian(10000,1,1),rinvgauss(10000,1,1)),nrow=10000,ncol=2)
+colnames(m)<-c("self-coded inverse gaussian","r package inverse gaussian")
+df<-as.data.frame(m)
+dfs<-stack(df)
+ggplot(dfs, aes(x=values))+geom_density(aes(group=ind,color=ind))+ggtitle("Density plot of inverse gaussian")+theme(plot.title = element_text(hjust=0.5, face="bold"))
+
+
+```
+
+
+
+
+```{r}
+multinorm = function (n, mean, cov) 
+{
+  # generate a sample of n from the multivariate normal with 
+  # mean vector "mean" and covariance matrix "cov"
+  
+  #cholesky decomposition to get a lower trangular
+  mean <- t(mean)
+  L <- chol(cov)
+  
+  X <-  mean + matrix(rnorm(n*length(mean)),nrow=n) %*% L
+  return(X)
+}
+```
+
+
+
+
+```{r}
+#shape parameter is alpha<1, rate parameter is constant 1.
+sample_gamma2 <- function(n,alpha,beta){
+  d <- 1.0334-0.0766*(exp(2.2942*alpha))  
+  a <- (2^alpha)*(1-exp(-d/2))^(alpha)
+  b <- alpha*d^(alpha-1)*(exp(-d))
+  c <- a+b
+  i <- 0
+  sample <- c()
+  while(i < n){
+    u <- runif(1,0,1)
+    if(u <= a/(a+b)){
+      X = -2*log(1-((c*u)^(1/alpha))/2)
+    }
+    else{
+      X = -log(c*(1-u)/(alpha*(d^(alpha-1))))
+    }
+    v <- runif(1,0,1)
+    if(X <= d){
+      temp1 <- (X^(alpha-1)*exp(-X/2))/((2^(alpha-1))*((1-exp(-X/2))^(alpha-1)))
+      if(v <= temp1){
+        i <- i+1
+        X <- X/beta
+        sample <- append(sample,X)
+      }
+    }
+    else if(X > d){
+      temp2 <- (d/X)^(1-alpha)
+      if(v <= temp2){
+        i <- i+1
+        X <- X/beta
+        sample <- append(sample,X)
+      }
+    }
+  }
+  return(sample)
+}
+```
+
+
+
+```{r}
+#Inverse Gaussian
+sample_invgaussian <- function(n, mu, lambda){
+  i <- 0
+  sample <- c()
+  while(i < n){
+    v <- rnorm(1,0,1)
+    y <- v^2
+    x <- mu + (mu^2)*y/(2*lambda) - (mu/(2*lambda))*sqrt(4*mu*lambda*y + (mu^2)*(y^2))
+    u <- runif(1,0,1)
+    if(u <= (mu/(mu+x))){
+      i <- i+1
+      sample <- append(sample,x)
+    }
+    else{
+      i <- i+1
+      x <- (mu^2)/x
+      sample <- append(sample,x)
+    }
+  }
+  return(sample)
+ }
+```
+
+
+
+```{r}
+data(diabetes)
+x <- diabetes$x
+y <- diabetes$y
+
+
+```
+
+
+
+```{r}
+Hierarchical_Model <- function(x, y, burn_in, max.steps, lambda) { 
+  n <- nrow(x) 
+  m <- ncol(x) 
+  XtX <- t(x) %*% x 
+  #Time saving 
+  y<-y-mean(y)
+  xy <- t(x) %*% y 
+  r <- 0 
+  delta <- 1 
+  likelihood_path <- c()
+  temp <- c()
+  
+  betaSamples <- matrix(0, max.steps, m) 
+  sigma2Samples <- rep(0, max.steps) 
+  invTau2Samples <- matrix(0, max.steps, m) 
+  beta <- rep(100,m) 
+  residue <- drop(y - x %*% beta) 
+  sigma2 <- 100
+  invTau2 <- 1 / (beta * beta) 
+  k <- 0 
+  
+  while (k < burn_in) { 
+    k <- k + 1 
+  if (k %% 1000 == 0) { 
+    cat('Iteration:', k, "\r") 
+    } 
+    
+    # sample beta 
+    invD <- diag(invTau2) 
+    invA <- solve(XtX + invD) 
+    mean <- invA %*% xy 
+    varcov <- sigma2 * invA 
+    beta <- drop(rmnorm(1, mean, varcov)) 
+    betaSamples[k,] <- beta 
+    
+    # sample sigma2 
+    shape <- (n+m-1)/2 
+    residue <- drop(y - x %*% beta) 
+    scale <- (t(residue) %*% residue + t(beta) %*% invD %*% beta)/2 
+    #sigma2 <- 1/rgamma(1, shape, 1/scale) 
+    if(shape >= 1){
+      sigma2 <- 1/sample_gamma1(1,shape,1/scale)
+    }
+    else if(shape < 1){
+      sigma2 <- 1/sample_gamma2(1,shape,1/scale)
+    }
+    sigma2Samples[k] <- sigma2 
+    
+    # sample tau2 
+    muPrime <- sqrt(lambda^2 * sigma2 / beta^2)
+    lambdaPrime <- lambda^2 
+    invTau2 <- rep(0, m) 
+    for (i in seq(m)) { 
+      invTau2[i] <- sample_invgaussian(1, muPrime[i], lambdaPrime) 
+    } 
+    invTau2Samples[k, ] <- invTau2 
+  }
+  
+    while (k < max.steps) { 
+      k <- k + 1 
+      if (k %% 1000 == 0) { 
+        cat('Iteration:', k, "\r") 
+        } 
+    
+    # sample beta 
+    invD <- diag(invTau2) 
+    invA <- solve(XtX + invD) 
+    mean <- invA %*% xy 
+    varcov <- sigma2 * invA 
+    beta <- drop(rmnorm(1, mean, varcov)) 
+    betaSamples[k,] <- beta 
+    
+    # sample sigma2 
+    shape <- (n+m-1)/2 
+    residue <- drop(y - x %*% beta) 
+    scale <- (t(residue) %*% residue + t(beta) %*% invD %*% beta)/2 
+    #sigma2 <- 1/rgamma(1, shape, 1/scale) 
+    if(shape >= 1){
+      sigma2 <- 1/sample_gamma1(1,shape,1/scale)
+    }
+    else if(shape < 1){
+      sigma2 <- 1/sample_gamma2(1,shape,1/scale)
+    }
+    sigma2Samples[k] <- sigma2 
+    
+    # sample tau2 
+    muPrime <- sqrt(lambda^2 * sigma2 / beta^2)
+    lambdaPrime <- lambda^2 
+    invTau2 <- rep(0, m) 
+    for (i in seq(m)) { 
+      invTau2[i] <- sample_invgaussian(1, muPrime[i], lambdaPrime) 
+    } 
+    invTau2Samples[k, ] <- invTau2 
+  }
+    estimate_beta <- colMedians(betaSamples[burn_in:max.steps, ])
+    rslt <- list(estimate_beta=estimate_beta, betaSamples=betaSamples)
+    return(rslt)
+}
+
+```
+
+
+
+```{r}
+Lambda_Lasso <- function(x, y, ini_lambda=0.5, max.steps=5000) { 
+  n <- nrow(x) 
+  m <- ncol(x) 
+  XtX <- t(x) %*% x 
+  #Time saving 
+  y <- y - mean(y)
+  xy <- t(x) %*% y 
+  likelihood_ratio_path <- c()
+  likelihood_path<-c()
+  temp <- c()
+  
+  betaSamples <- matrix(0, max.steps, m) 
+  sigma2Samples <- rep(0, max.steps) 
+  invTau2Samples <- matrix(0, max.steps, m) 
+  lambdaSamples <- rep(0, max.steps/10) 
+  beta <- rnorm(m,0,1) 
+  residue <- drop(y - x %*% beta) 
+  sigma2 <- drop((t(residue) %*% residue) / n) 
+  invTau2 <- 1 / (beta * beta) 
+  lambda <- ini_lambda
+  k <- 0 
+  
+  while (k < max.steps) { 
+    k <- k + 1 
+  if (k %% 1000 == 0) { 
+    cat('Iteration:', k, "\r") 
+    } 
+    
+    # sample beta 
+    invD <- diag(invTau2) 
+    invA <- solve(XtX + invD) 
+    mean <- invA %*% xy 
+    varcov <- sigma2 * invA 
+    beta <- drop(rmnorm(1, mean, varcov)) 
+    betaSamples[k,] <- beta 
+    
+    # sample sigma2 
+    shape <- (n+m-1)/2 
+    residue <- drop(y - x %*% beta) 
+    scale <- (t(residue) %*% residue + t(beta) %*% invD %*% beta)/2 
+    #sigma2 <- 1/rgamma(1, shape, 1/scale) 
+    if(shape >= 1){
+      sigma2 <- 1/sample_gamma1(1,shape,1/scale)
+    }
+    else if(shape < 1){
+      sigma2 <- 1/sample_gamma2(1,shape,1/scale)
+    }
+    sigma2Samples[k] <- sigma2 
+    
+    # sample tau2 
+    muPrime <- sqrt(lambda^2 * sigma2 / beta^2)
+    lambdaPrime <- lambda^2 
+    invTau2 <- rep(0, m) 
+    for (i in seq(m)) { 
+      invTau2[i] <- sample_invgaussian(1, muPrime[i], lambdaPrime) 
+    } 
+    invTau2Samples[k, ] <- invTau2 
+    
+      if (k %% 10 == 0) {
+        low <- k - 9 
+        high <- k 
+        lambda <- sqrt( 2*m / sum(colMeans(invTau2Samples[low:high, ])))
+        lambdaSamples[k/10] <- lambda
+         log_likelihood <- -((n+m-1)/2+1)*log(sigma2)-(1/sigma2)*((t(residue) %*% residue)/2)-0.5*sum(log(1/(invTau2Samples[k, ]))) -0.5*sum((beta^2)*invTau2/sigma2)+m*log(lambda^2)-((lambda^2)/2)*sum(1/invTau2)
+      likelihood_path <- append(likelihood_path, log_likelihood)
+        if(k/10 > 1){
+          likelihood_ratio_path <- likelihood_path[-1]/ likelihood_path[-(k/10)]
+        }
+    inx <- which.max(likelihood_ratio_path)
+    lambda_estimate <- lambdaSamples[inx]
+      }
+    lambdaSamples[k] <- lambda
+    
+    }
+    rslt <- list(lambda=lambda)
+    return(rslt)
+}
+```
+
+
+
+```{r}
+gibbsBLasso = function(x, y, burn_in=5000, max.steps = 10000) {
+	n <- nrow(x)
+	m <- ncol(x)
+  y<-y-mean(y)
+	XtX <- t(x) %*% x	#Time saving
+	xy <- t(x) %*% y
+
+	r <- 0
+	delta <- 1
+
+	betaSamples <- matrix(0, max.steps, m)
+	sigma2Samples <- rep(0, max.steps)
+	invTau2Samples <- matrix(0, max.steps, m)
+	lambdaSamples <- rep(0, max.steps)
+
+	#beta <- drop(backsolve(XtX + diag(nrow=m), xy))
+	beta <- rnorm(m,0,1)
+	residue <- drop(y - x %*% beta)
+	sigma2 <- drop((t(residue) %*% residue) / n)
+	invTau2 <- 1 / (beta * beta)
+	lambda <- 1
+
+	k <- 0
+	while (k < max.steps) {
+		k <- k + 1
+
+		if (k %% 1000 == 0) {
+			cat('Iteration:', k, "\r")
+		}
+
+		# sample beta
+		invD <- diag(invTau2)
+		invA <- solve(XtX + invD)
+		mean <- invA %*% xy
+		varcov <- sigma2 * invA
+		#beta <- drop(rmnorm(1, mean, varcov))
+		beta <- drop(multinorm(1, mean, varcov))
+		
+		betaSamples[k,] <- beta
+
+		# sample sigma2
+		shape <- (n+m-1)/2
+		residue <- drop(y - x %*% beta)
+		scale <- (t(residue) %*% residue + t(beta) %*% invD %*% beta)/2
+		#sigma2 <- 1/rgamma(1, shape, 1/scale)
+		 if(shape >= 1){
+      sigma2 <- 1/sample_gamma1(1,shape,1/scale)
+    }
+    else if(shape < 1){
+      sigma2 <- 1/sample_gamma2(1,shape,1/scale)
+    }
+		sigma2Samples[k] <- sigma2
+
+		# sample tau2
+		muPrime <- sqrt(lambda^2 * sigma2 / beta^2)
+		lambdaPrime <- lambda^2
+		invTau2 <- rep(0, m)
+		for (i in seq(m)) {
+			invTau2[i] <- sample_invgaussian(1, muPrime[i], lambdaPrime)
+		}
+		invTau2Samples[k, ] <- invTau2
+
+		# update lambda
+		shape = r + m
+		scale = delta + sum(1/invTau2)/2
+		#lambda <- sqrt(rgamma(1, shape, 1/scale))
+			if(shape >= 1){
+      lambda <- sqrt(sample_gamma1(1,shape,1/scale))
+    }
+    else if(shape < 1){
+      lambda <- sqrt(sample_gamma2(1,shape,1/scale))
+    }
+
+		lambdaSamples[k] <- lambda
+	}
+    estimate_lambda <- median(lambdaSamples[burn_in:max.steps])
+	  estimate_beta <- colMedians(betaSamples[burn_in:max.steps, ])
+	  betaSamples <- betaSamples[burn_in:max.steps, ]
+    rslt <- list(estimate_beta=estimate_beta, betaSamples=betaSamples, lambda=estimate_lambda, lambdaSamples=lambdaSamples)
+    return(rslt)
+}
+```
+
+
+
+```{r}
+n=200
+m=50
+x=matrix(rep(0,m*n),nrow=n)
+y=rep(0,n)
+for (i in 1:n){
+  z=rnorm(1,0,1)
+  for(j in 1:m){
+    x[i,j]=(z+rnorm(1,0,1))/2
+  }
+  y[i]=1*x[i,1]-1*x[i,2]+0.5*x[i,3]+0.6*rnorm(1,0,1)
+}
+```
+
+
+
+```{r}
+data<-gibbsBLasso(x,y)
+```
+```{r}
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+m1<-matrix(data=data$betaSamples[,1] ,nrow=5000, ncol=1)
+df1<-as.data.frame(m1)
+m2<-matrix(data=data$betaSamples[,2] ,nrow=5000, ncol=1)
+df2<-as.data.frame(m2)
+m3<-matrix(data=data$betaSamples[,3] ,nrow=5000, ncol=1)
+df3<-as.data.frame(m3)
+m4<-matrix(data=data$betaSamples[,4] ,nrow=5000, ncol=1)
+df4<-as.data.frame(m4)
+m5<-matrix(data=data$betaSamples[,5] ,nrow=5000, ncol=1)
+df5<-as.data.frame(m5)
+m6<-matrix(data=data$betaSamples[,6] ,nrow=5000, ncol=1)
+df6<-as.data.frame(m6)
+
+p1 <- ggplot(df1, aes(x=V1)) + geom_histogram(aes(y=..density..), binwidth=0.0008, colour="black", fill="white") + geom_density(alpha=.3, fill="#FF6666")+labs(x="Beta1", y="Density")+ ggtitle("Plot for Beta1 Samples")
+p2 <- ggplot(df2, aes(x=V1)) + geom_histogram(aes(y=..density..), binwidth=0.0008, colour="black", fill="white") + geom_density(alpha=.3, fill="#FF6666")+labs(x="Beta2", y="Density")+ ggtitle("Plot for Beta2 Samples")
+p3 <- ggplot(df3, aes(x=V1)) + geom_histogram(aes(y=..density..), binwidth=0.0008, colour="black", fill="white") + geom_density(alpha=.3, fill="#FF6666")+labs(x="Beta3", y="Density")+ ggtitle("Plot for Beta3 Samples")
+p4 <- ggplot(df4, aes(x=V1)) + geom_histogram(aes(y=..density..), binwidth=0.0008, colour="black", fill="white") + geom_density(alpha=.3, fill="#FF6666")+labs(x="Beta4", y="Density")+ ggtitle("Plot for Beta4 Samples")
+p5 <- ggplot(df5, aes(x=V1)) + geom_histogram(aes(y=..density..), binwidth=0.0008, colour="black", fill="white") + geom_density(alpha=.3, fill="#FF6666")+labs(x="Beta5", y="Density")+ ggtitle("Plot for Beta5 Samples")
+p6 <- ggplot(df6, aes(x=V1)) + geom_histogram(aes(y=..density..), binwidth=0.0008, colour="black", fill="white") + geom_density(alpha=.3, fill="#FF6666")+labs(x="Beta6", y="Density")+ ggtitle("Plot for Beta6 Samples")
+
+multiplot(p1, p2, p3, p4, p5, p6, cols=3, main = "Plot for Kernel Density Estimate")
+
+```
+
+
+
+
+
+
+```{r}
+data_list <- gibbsBLasso(x,y)
+```
+
+
+```{r}
+beta <- data_list$estimate_beta
+m<-matrix(data=cbind(beta,c(1:50)),nrow=50,ncol=2)
+df<-as.data.frame(m)
+text <- paste("Lambda =", data_list$lambda)  
+grob <- grobTree(textGrob(text, x=0.6, y=0.90, hjust=0, gp=gpar(col="black", fontsize=13, fontface="italic")))
+ggplot(df, aes(x=m[,2], y=m[,1]))+ geom_point(alpha=0.5, size=2.6)+ geom_hline(yintercept = 0, color = "#56B4E9")+
+labs(x="Index of Beta", y="Value of Beta)")+ ggtitle("Plot of Beta after Bayesian Lasso Shinkage")+ theme(plot.title = element_text(hjust=0.5, face="bold"))+ annotation_custom(grob)
+
+```
+
+
+
+
+```{r}
+install.packages("glmnet")
+library("glmnet")
+```
+```{r}
+ plot(cv.glmnet(x,y))
+```
+
